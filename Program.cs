@@ -54,7 +54,7 @@ namespace FNF_PROJ
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("AllowFrontend",
-                    policy => policy.WithOrigins("http://localhost:5173") // React app
+                    policy => policy.WithOrigins("http://localhost:5175") // React app
                                     .AllowAnyHeader()
                                     .AllowAnyMethod()
                                     .AllowCredentials());
