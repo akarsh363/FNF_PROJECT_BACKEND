@@ -1,9 +1,12 @@
-﻿// ======================= PostService.cs =======================
+﻿// File: PostService.cs
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using FNF_PROJ.Data;
 using FNF_PROJ.DTOs;
 
@@ -23,15 +26,23 @@ namespace FNF_PROJ.Services
     public class PostService : IPostService
     {
         private readonly AppDbContext _db;
-        public PostService(AppDbContext db) { _db = db; }
+        private readonly IWebHostEnvironment _env;
+
+        public PostService(AppDbContext db, IWebHostEnvironment env)
+        {
+            _db = db;
+            _env = env;
+        }
 
         public async Task<PostResponseDto> CreatePostAsync(int userId, PostCreateDto dto)
         {
             var user = await _db.Users.FindAsync(userId) ?? throw new InvalidOperationException("User not found");
+
+            // IMPORTANT: dto.Body is expected to contain the full JSON string from client (BodyJson)
             var post = new Post
             {
-                Title = dto.Title,
-                Body = dto.Body,
+                Title = dto.Title ?? "",
+                Body = dto.Body ?? "",     // store JSON verbatim
                 UserId = user.UserId,
                 DeptId = user.DepartmentId,
                 CreatedAt = DateTime.UtcNow,
@@ -39,29 +50,131 @@ namespace FNF_PROJ.Services
                 DownvoteCount = 0,
                 IsRepost = false
             };
+
             _db.Posts.Add(post);
             await _db.SaveChangesAsync();
-            return new PostResponseDto
+
+            // Persist files (Attachments) if provided
+            if (dto.Attachments != null && dto.Attachments.Any())
             {
-                PostId = post.PostId,
-                Title = post.Title,
-                Body = post.Body,
-                AuthorName = user.FullName,
-                DepartmentName = post.Dept?.DeptName ?? $"Dept {post.DeptId}",
-                UpvoteCount = post.UpvoteCount,
-                DownvoteCount = post.DownvoteCount,
-                Tags = new List<string>(),
-                Attachments = new List<string>(),
-                IsRepost = false,
-                CreatedAt = post.CreatedAt
-            };
+                var webRoot = _env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+                var postsFolder = Path.Combine(webRoot, "posts");
+                if (!Directory.Exists(postsFolder)) Directory.CreateDirectory(postsFolder);
+
+                foreach (var file in dto.Attachments)
+                {
+                    if (file == null || file.Length == 0) continue;
+
+                    // The client should name files as "<elementId>-<origname>".
+                    // Prefer to preserve the client-provided filename to keep elementId mapping.
+                    var clientFileName = Path.GetFileName(file.FileName);
+                    var safeFileName = SanitizeFileName(clientFileName);
+                    var targetPath = Path.Combine(postsFolder, safeFileName);
+
+                    // If file already exists, append a short GUID to avoid overwrite while keeping prefix
+                    if (System.IO.File.Exists(targetPath))
+                    {
+                        var ext = Path.GetExtension(safeFileName);
+                        var nameOnly = Path.GetFileNameWithoutExtension(safeFileName);
+                        safeFileName = $"{nameOnly}-{Guid.NewGuid().ToString("n").Substring(0, 8)}{ext}";
+                        targetPath = Path.Combine(postsFolder, safeFileName);
+                    }
+
+                    using (var stream = new FileStream(targetPath, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    var publicPath = $"/posts/{safeFileName}";
+
+                    var attachment = new Attachment
+                    {
+                        PostId = post.PostId,
+                        FileName = safeFileName,
+                        FilePath = publicPath,
+                        FileType = file.ContentType ?? "application/octet-stream",
+                        UploadedAt = DateTime.UtcNow
+                    };
+                    _db.Attachments.Add(attachment);
+                }
+                await _db.SaveChangesAsync();
+            }
+
+            // --- attempt to reload the newly created post with navigation properties ---
+            try
+            {
+                var savedPost = await _db.Posts
+                    .Include(p => p.User)
+                    .Include(p => p.Dept)
+                    .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
+                    .Include(p => p.Attachments)
+                    .FirstOrDefaultAsync(p => p.PostId == post.PostId);
+
+                if (savedPost == null)
+                {
+                    // unexpected but gracefully fallback (will be handled below in catch)
+                    Console.WriteLine($"Warning: Post {post.PostId} not found after creation.");
+                    throw new InvalidOperationException($"Post {post.PostId} was not found after creation.");
+                }
+
+                var attachmentsList = savedPost.Attachments?.Where(a => a != null)
+                    .Select(a => a.FilePath).ToList() ?? new List<string>();
+
+                var tagsList = savedPost.PostTags?
+                    .Where(pt => pt != null && pt.Tag != null)
+                    .Select(pt => pt.Tag.TagName).ToList() ?? new List<string>();
+
+                return new PostResponseDto
+                {
+                    PostId = savedPost.PostId,
+                    Title = savedPost.Title,
+                    Body = savedPost.Body,
+                    AuthorName = savedPost.User?.FullName ?? "(unknown)",
+                    DepartmentName = savedPost.Dept?.DeptName ?? $"Dept {savedPost.DeptId}",
+                    UpvoteCount = savedPost.UpvoteCount,
+                    DownvoteCount = savedPost.DownvoteCount,
+                    Tags = tagsList,
+                    Attachments = attachmentsList,
+                    IsRepost = savedPost.IsRepost,
+                    CreatedAt = savedPost.CreatedAt
+                };
+            }
+            catch (Exception ex)
+            {
+                // Log the exception so you can paste the stack trace here for deeper debugging
+                Console.WriteLine("Exception while reloading saved post: " + ex);
+
+                // Fallback: build DTO from the 'post' we have and the attachments we previously saved
+                var attachments = await _db.Attachments.Where(a => a.PostId == post.PostId).ToListAsync();
+                var attachmentsList = attachments?.Select(a => a.FilePath).ToList() ?? new List<string>();
+
+                // tags may not be available — return empty list safely
+                return new PostResponseDto
+                {
+                    PostId = post.PostId,
+                    Title = post.Title,
+                    Body = post.Body,
+                    AuthorName = user?.FullName ?? "(unknown)",
+                    DepartmentName = post.Dept?.DeptName ?? $"Dept {post.DeptId}",
+                    UpvoteCount = post.UpvoteCount,
+                    DownvoteCount = post.DownvoteCount,
+                    Tags = new List<string>(),
+                    Attachments = attachmentsList,
+                    IsRepost = post.IsRepost,
+                    CreatedAt = post.CreatedAt
+                };
+            }
         }
 
         public async Task<PostResponseDto> EditPostAsync(int userId, string role, int deptId, int postId, PostCreateDto dto)
         {
-            var post = await _db.Posts.Include(p => p.User).Include(p => p.Dept)
-                                      .FirstOrDefaultAsync(p => p.PostId == postId)
-                       ?? throw new InvalidOperationException("Post not found");
+            var post = await _db.Posts
+                .Include(p => p.User)
+                .Include(p => p.Dept)
+                .Include(p => p.Attachments)
+                .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
+                .FirstOrDefaultAsync(p => p.PostId == postId) ?? throw new InvalidOperationException("Post not found");
+
             if (string.Equals(role, "Employee", StringComparison.OrdinalIgnoreCase))
             {
                 if (post.UserId != userId) throw new UnauthorizedAccessException();
@@ -72,10 +185,55 @@ namespace FNF_PROJ.Services
             }
             else throw new UnauthorizedAccessException();
 
-            post.Title = dto.Title;
-            post.Body = dto.Body;
+            // Update Body verbatim
+            post.Title = dto.Title ?? post.Title;
+            post.Body = dto.Body ?? post.Body; // store JSON as provided
             post.UpdatedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
+
+            // Optionally handle new attachments if dto.Attachments provided (append)
+            if (dto.Attachments != null && dto.Attachments.Any())
+            {
+                var webRoot = _env.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
+                var postsFolder = Path.Combine(webRoot, "posts");
+                if (!Directory.Exists(postsFolder)) Directory.CreateDirectory(postsFolder);
+
+                foreach (var file in dto.Attachments)
+                {
+                    if (file == null || file.Length == 0) continue;
+                    var clientFileName = Path.GetFileName(file.FileName);
+                    var safeFileName = SanitizeFileName(clientFileName);
+                    var targetPath = Path.Combine(postsFolder, safeFileName);
+                    if (System.IO.File.Exists(targetPath))
+                    {
+                        var ext = Path.GetExtension(safeFileName);
+                        var nameOnly = Path.GetFileNameWithoutExtension(safeFileName);
+                        safeFileName = $"{nameOnly}-{Guid.NewGuid().ToString("n").Substring(0, 8)}{ext}";
+                        targetPath = Path.Combine(postsFolder, safeFileName);
+                    }
+
+                    using (var stream = new FileStream(targetPath, FileMode.Create))
+                    {
+                        await file.CopyToAsync(stream);
+                    }
+
+                    var publicPath = $"/posts/{safeFileName}";
+                    var attachment = new Attachment
+                    {
+                        PostId = post.PostId,
+                        FileName = safeFileName,
+                        FilePath = publicPath,
+                        FileType = file.ContentType ?? "application/octet-stream",
+                        UploadedAt = DateTime.UtcNow
+                    };
+                    _db.Attachments.Add(attachment);
+                }
+                await _db.SaveChangesAsync();
+            }
+
+            // Reload attachments
+            var attachmentsReload = await _db.Attachments.Where(a => a.PostId == post.PostId).ToListAsync();
+
             return new PostResponseDto
             {
                 PostId = post.PostId,
@@ -85,8 +243,8 @@ namespace FNF_PROJ.Services
                 DepartmentName = post.Dept?.DeptName ?? $"Dept {post.DeptId}",
                 UpvoteCount = post.UpvoteCount,
                 DownvoteCount = post.DownvoteCount,
-                Tags = post.PostTags?.Select(t => t.Tag.TagName).ToList(),
-                Attachments = post.Attachments?.Select(a => a.FilePath).ToList(),
+                Tags = post.PostTags?.Select(pt => pt.Tag.TagName).ToList(),
+                Attachments = attachmentsReload.Select(a => a.FilePath).ToList(),
                 IsRepost = post.IsRepost,
                 CreatedAt = post.CreatedAt
             };
@@ -94,11 +252,12 @@ namespace FNF_PROJ.Services
 
         public async Task DeletePostAsync(int userId, int deptId, int postId)
         {
-            var post = await _db.Posts.FirstOrDefaultAsync(p => p.PostId == postId)
-                       ?? throw new InvalidOperationException("Post not found");
+            var post = await _db.Posts.FirstOrDefaultAsync(p => p.PostId == postId) ?? throw new InvalidOperationException("Post not found");
             var user = await _db.Users.FindAsync(userId) ?? throw new InvalidOperationException("User not found");
             if (!string.Equals(user.Role, "Manager", StringComparison.OrdinalIgnoreCase)) throw new UnauthorizedAccessException();
             if (post.DeptId != deptId) throw new UnauthorizedAccessException();
+
+            // optional: delete attachments files from disk if required (not implemented)
             _db.Posts.Remove(post);
             await _db.SaveChangesAsync();
         }
@@ -152,6 +311,7 @@ namespace FNF_PROJ.Services
                 .Include(r => r.Post).ThenInclude(p => p.PostTags).ThenInclude(pt => pt.Tag)
                 .Include(r => r.Post).ThenInclude(p => p.Attachments)
                 .Where(r => r.PostId == postId).OrderByDescending(r => r.CreatedAt).ToListAsync();
+
             return reposts.Select(r => new PostResponseDto
             {
                 PostId = r.Post.PostId,
@@ -174,12 +334,14 @@ namespace FNF_PROJ.Services
                 .Include(p => p.User).Include(p => p.Dept)
                 .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
                 .Include(p => p.Attachments).ToListAsync();
+
             var reposts = await _db.Reposts
                 .Include(r => r.User)
                 .Include(r => r.Post).ThenInclude(p => p.User)
                 .Include(r => r.Post).ThenInclude(p => p.Dept)
                 .Include(r => r.Post).ThenInclude(p => p.PostTags).ThenInclude(pt => pt.Tag)
                 .Include(r => r.Post).ThenInclude(p => p.Attachments).ToListAsync();
+
             var postDtos = posts.Select(p => new PostResponseDto
             {
                 PostId = p.PostId,
@@ -194,6 +356,7 @@ namespace FNF_PROJ.Services
                 IsRepost = false,
                 CreatedAt = p.CreatedAt
             });
+
             var repostDtos = reposts.Select(r => new PostResponseDto
             {
                 PostId = r.Post.PostId,
@@ -208,6 +371,7 @@ namespace FNF_PROJ.Services
                 IsRepost = true,
                 CreatedAt = r.CreatedAt
             });
+
             return postDtos.Concat(repostDtos).OrderByDescending(x => x.CreatedAt).ToList();
         }
 
@@ -219,11 +383,12 @@ namespace FNF_PROJ.Services
                 .Include(p => p.Attachments)
                 .FirstOrDefaultAsync(p => p.PostId == postId);
             if (p == null) return null;
+
             return new PostResponseDto
             {
                 PostId = p.PostId,
                 Title = p.Title,
-                Body = p.Body,
+                Body = p.Body, // exact JSON
                 AuthorName = p.User.FullName,
                 DepartmentName = p.Dept?.DeptName ?? $"Dept {p.DeptId}",
                 UpvoteCount = p.UpvoteCount,
@@ -233,6 +398,17 @@ namespace FNF_PROJ.Services
                 IsRepost = p.IsRepost,
                 CreatedAt = p.CreatedAt
             };
+        }
+
+        // Basic filename sanitizer - keep safe characters, remove path segments
+        private static string SanitizeFileName(string filename)
+        {
+            var name = Path.GetFileName(filename); // remove path
+            foreach (var c in Path.GetInvalidFileNameChars())
+            {
+                name = name.Replace(c, '_');
+            }
+            return name;
         }
     }
 }
