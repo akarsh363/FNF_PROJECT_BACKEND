@@ -63,7 +63,7 @@ namespace FNF_PROJ.Mapper
             // =========================
             // Vote Mappings
             // =========================
-            CreateMap<VoteDto, Vote>()
+            CreateMap<VoteRequestDto, Vote>()
                 .ForMember(dest => dest.CreatedAt, opt => opt.Ignore()); // set in service
 
             // =========================
