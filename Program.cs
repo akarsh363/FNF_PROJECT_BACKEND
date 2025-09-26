@@ -117,6 +117,7 @@ namespace FNF_PROJ
             builder.Services.AddScoped<IAuthService, AuthService>();
             builder.Services.AddScoped<IPostService, PostService>();
             builder.Services.AddScoped<CommentService>();
+            builder.Services.AddScoped<ITagService,TagService>();
 
             // ✅ Register concrete VoteService (no interface)
             builder.Services.AddScoped<VoteService>();
