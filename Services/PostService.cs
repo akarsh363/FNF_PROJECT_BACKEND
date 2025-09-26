@@ -1,15 +1,18 @@
-﻿//using System;
+﻿//// File: Services/PostService.cs
+//using System;
 //using System.Collections.Generic;
 //using System.IO;
 //using System.Linq;
 //using System.Threading.Tasks;
 //using Microsoft.EntityFrameworkCore;
 //using Microsoft.AspNetCore.Hosting;
+//using Microsoft.Extensions.Logging;
 //using FNF_PROJ.Data;
 //using FNF_PROJ.DTOs;
 
 //namespace FNF_PROJ.Services
 //{
+//    // Interface + implementation in same file
 //    public interface IPostService
 //    {
 //        Task<PostResponseDto> CreatePostAsync(int userId, PostCreateDto dto);
@@ -26,11 +29,13 @@
 //    {
 //        private readonly AppDbContext _db;
 //        private readonly IWebHostEnvironment _env;
+//        private readonly ILogger<PostService>? _logger;
 
-//        public PostService(AppDbContext db, IWebHostEnvironment env)
+//        public PostService(AppDbContext db, IWebHostEnvironment env, ILogger<PostService>? logger = null)
 //        {
 //            _db = db;
 //            _env = env;
+//            _logger = logger;
 //        }
 
 //        public async Task<PostResponseDto> CreatePostAsync(int userId, PostCreateDto dto)
@@ -94,6 +99,7 @@
 //                await _db.SaveChangesAsync();
 //            }
 
+//            // Reload with joins to build DTO
 //            try
 //            {
 //                var savedPost = await _db.Posts
@@ -105,7 +111,7 @@
 
 //                if (savedPost == null)
 //                {
-//                    Console.WriteLine($"Warning: Post {post.PostId} not found after creation.");
+//                    _logger?.LogWarning("Post {PostId} not found after creation", post.PostId);
 //                    throw new InvalidOperationException($"Post {post.PostId} was not found after creation.");
 //                }
 
@@ -133,7 +139,7 @@
 //            }
 //            catch (Exception ex)
 //            {
-//                Console.WriteLine("Exception while reloading saved post: " + ex);
+//                _logger?.LogError(ex, "Exception while reloading saved post {PostId}", post.PostId);
 
 //                var attachments = await _db.Attachments.Where(a => a.PostId == post.PostId).ToListAsync();
 //                var attachmentsList = attachments?.Select(a => a.FilePath).ToList() ?? new List<string>();
@@ -247,11 +253,20 @@
 //            await _db.SaveChangesAsync();
 //        }
 
+//        /// <summary>
+//        /// Repost flow:
+//        /// - Ensure original post exists
+//        /// - Ensure user hasn't already reposted (Reposts table)
+//        /// - Create Repost row
+//        /// - Mark the original Post.IsRepost = true and save both changes in same SaveChanges call
+//        /// - Return a PostResponseDto representing the repost (IsRepost = true)
+//        /// </summary>
 //        public async Task<PostResponseDto> RepostAsync(int currentUserId, RepostDto dto)
 //        {
 //            if (dto == null || dto.PostId <= 0) throw new InvalidOperationException("Invalid repost payload");
 
 //            var user = await _db.Users.FindAsync(currentUserId) ?? throw new InvalidOperationException("User not found");
+
 //            var post = await _db.Posts
 //                .Include(p => p.User)
 //                .Include(p => p.PostTags).ThenInclude(pt => pt.Tag)
@@ -260,14 +275,27 @@
 //                .FirstOrDefaultAsync(p => p.PostId == dto.PostId)
 //                       ?? throw new InvalidOperationException("Original post not found");
 
-//            // Allow any authenticated user to repost any post.
+//            // prevent duplicate repost by same user
 //            var already = await _db.Reposts.AnyAsync(r => r.PostId == post.PostId && r.UserId == currentUserId);
 //            if (already) throw new InvalidOperationException("Already reposted");
 
-//            var repost = new Repost { PostId = post.PostId, UserId = user.UserId, CreatedAt = DateTime.UtcNow };
+//            // create repost record
+//            var repost = new Repost
+//            {
+//                PostId = post.PostId,
+//                UserId = user.UserId,
+//                CreatedAt = DateTime.UtcNow
+//            };
 //            _db.Reposts.Add(repost);
+
+//            // Also set the original Post's IsRepost flag to true (persist it)
+//            post.IsRepost = true;
+//            _db.Posts.Update(post); // optional if tracked; safe to call
+
+//            // Save both repost record and post flag in same transaction
 //            await _db.SaveChangesAsync();
 
+//            // Build PostResponseDto to return (representing the repost event)
 //            return new PostResponseDto
 //            {
 //                PostId = post.PostId,
@@ -363,7 +391,7 @@
 //                DownvoteCount = p.DownvoteCount,
 //                Tags = p.PostTags?.Select(t => t.Tag.TagName).ToList(),
 //                Attachments = p.Attachments?.Select(a => a.FilePath).ToList(),
-//                IsRepost = false,
+//                IsRepost = p.IsRepost,
 //                CreatedAt = p.CreatedAt
 //            });
 
@@ -421,6 +449,8 @@
 //        }
 //    }
 //}
+
+
 // File: Services/PostService.cs
 using System;
 using System.Collections.Generic;
@@ -519,6 +549,37 @@ namespace FNF_PROJ.Services
                     };
                     _db.Attachments.Add(attachment);
                 }
+                await _db.SaveChangesAsync();
+            }
+
+            // --- NEW: Tags: validate against user's department and persist PostTag rows ---
+            if (dto.TagIds != null && dto.TagIds.Any())
+            {
+                var requestedTagIds = dto.TagIds.Distinct().ToList();
+
+                var validTags = await _db.Tags
+                    .Where(t => requestedTagIds.Contains(t.TagId) && t.DeptId == user.DepartmentId)
+                    .ToListAsync();
+
+                if (_logger != null && validTags.Count != requestedTagIds.Count)
+                {
+                    var invalid = requestedTagIds.Except(validTags.Select(t => t.TagId)).ToList();
+                    _logger.LogWarning("User {UserId} attempted to attach invalid/out-of-dept tags: {InvalidTagIds}", userId, string.Join(",", invalid));
+                }
+
+                foreach (var tag in validTags)
+                {
+                    var exists = await _db.PostTags.AnyAsync(pt => pt.PostId == post.PostId && pt.TagId == tag.TagId);
+                    if (!exists)
+                    {
+                        _db.PostTags.Add(new PostTag
+                        {
+                            PostId = post.PostId,
+                            TagId = tag.TagId
+                        });
+                    }
+                }
+
                 await _db.SaveChangesAsync();
             }
 
