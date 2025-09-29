@@ -61,8 +61,7 @@ namespace FNF_PROJ.Services
             {
                 FullName = dto.FullName,
                 Email = dto.Email,
-                // Force role to "Employee" — do not allow client-provided role on registration
-                Role = "Employee",
+                Role = "Employee", // enforce
                 DepartmentId = dto.DepartmentId,
                 ProfilePicture = profilePath,
                 CreatedAt = DateTime.UtcNow
@@ -91,22 +90,31 @@ namespace FNF_PROJ.Services
         private string GenerateJwtToken(User user)
         {
             var jwt = _config.GetSection("Jwt");
-            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt["Key"] ?? "DefaultSecretKey12345"));
+
+            // ✅ Make sure we pass byte[] to SymmetricSecurityKey
+            var keyBytes = Encoding.UTF8.GetBytes(jwt["Key"] ?? "DefaultSecretKey12345");
+            var key = new SymmetricSecurityKey(keyBytes);
             var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
+            // NOTE: In your model, DepartmentId is an int (not nullable) in existing code,
+            // so do NOT use the null-coalescing operator here.
             var claims = new[]
             {
                 new Claim(JwtRegisteredClaimNames.Sub, user.UserId.ToString()),
                 new Claim(ClaimTypes.Name, user.FullName),
                 new Claim(ClaimTypes.Email, user.Email),
-                new Claim(ClaimTypes.Role, user.Role)
+                new Claim(ClaimTypes.Role, user.Role),
+                // Optional helpful custom claim for clients/services:
+                new Claim("departmentId", user.DepartmentId.ToString())
             };
+
+            var expiresMinutes = int.TryParse(jwt["ExpiresMinutes"], out var m) ? m : 60;
 
             var token = new JwtSecurityToken(
                 issuer: jwt["Issuer"],
                 audience: jwt["Audience"],
                 claims: claims,
-                expires: DateTime.UtcNow.AddMinutes(int.TryParse(jwt["ExpiresMinutes"], out var m) ? m : 60),
+                expires: DateTime.UtcNow.AddMinutes(expiresMinutes),
                 signingCredentials: creds
             );
 
@@ -114,3 +122,4 @@ namespace FNF_PROJ.Services
         }
     }
 }
+
