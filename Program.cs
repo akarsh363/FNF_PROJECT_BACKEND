@@ -27,6 +27,11 @@
 //            // Register AuthService & PostService
 //            builder.Services.AddScoped<IAuthService, AuthService>();
 //            builder.Services.AddScoped<IPostService, PostService>();
+//            builder.Services.AddScoped<CommentService>();
+//            builder.Services.AddScoped<ITagService,TagService>();
+
+//            // ✅ Register concrete VoteService (no interface)
+//            builder.Services.AddScoped<VoteService>();
 
 //            // JWT configuration
 //            var jwtSection = builder.Configuration.GetSection("Jwt");
@@ -50,11 +55,11 @@
 
 //            builder.Services.AddAuthorization();
 
-//            // 🔹 Enable CORS
+//            // 🔹 CORS (adjust port to your Vite dev server)
 //            builder.Services.AddCors(options =>
 //            {
 //                options.AddPolicy("AllowFrontend",
-//                    policy => policy.WithOrigins("http://localhost:5174") // React app
+//                    policy => policy.WithOrigins("http://localhost:5173")
 //                                    .AllowAnyHeader()
 //                                    .AllowAnyMethod()
 //                                    .AllowCredentials());
@@ -117,7 +122,7 @@ namespace FNF_PROJ
             builder.Services.AddScoped<IAuthService, AuthService>();
             builder.Services.AddScoped<IPostService, PostService>();
             builder.Services.AddScoped<CommentService>();
-            builder.Services.AddScoped<ITagService,TagService>();
+            builder.Services.AddScoped<ITagService, TagService>();
 
             // ✅ Register concrete VoteService (no interface)
             builder.Services.AddScoped<VoteService>();
@@ -148,7 +153,7 @@ namespace FNF_PROJ
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("AllowFrontend",
-                    policy => policy.WithOrigins("http://localhost:5174")
+                    policy => policy.WithOrigins("http://localhost:5173")
                                     .AllowAnyHeader()
                                     .AllowAnyMethod()
                                     .AllowCredentials());
