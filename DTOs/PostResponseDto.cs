@@ -8,7 +8,8 @@
     public int DeptId { get; set; }   // ✅ Added for manager delete check
     public int UpvoteCount { get; set; }
     public int DownvoteCount { get; set; }
-    public List<string>? Tags { get; set; }
+    public List<string> Tags { get; set; } = new();
+
     public List<string>? Attachments { get; set; }
     public bool IsRepost { get; set; }
     public DateTime CreatedAt { get; set; }

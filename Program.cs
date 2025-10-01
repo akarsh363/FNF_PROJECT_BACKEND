@@ -79,7 +79,7 @@ namespace FNF_PROJ
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("AllowFrontend",
-                    policy => policy.WithOrigins("http://localhost:5173")
+                    policy => policy.WithOrigins("http://localhost:5175")
                                     .AllowAnyHeader()
                                     .AllowAnyMethod()
                                     .AllowCredentials());
